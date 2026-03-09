@@ -5,3 +5,9 @@ gymnasium>=0.29.0
 h5py>=3.9.0
 pytest>=7.4.0
 torch-geometric>=2.4.0
+scipy>=1.11.0
+# Optional: SGP4 orbital propagator (enables Sgp4Propagator back-end)
+# sgp4>=2.22
+# Optional: ONNX export for inference latency benchmark
+# onnxruntime>=1.16.0
+# onnxscript>=0.1.0

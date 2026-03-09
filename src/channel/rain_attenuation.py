@@ -15,7 +15,7 @@ References:
 """
 
 import math
-from typing import Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -282,6 +282,115 @@ class ChannelModel:
         )
         snr_db = received_power_dbw - noise_power_dbw
         return snr_db
+
+    def compute_sinr(
+        self,
+        sat_pos: Sequence[float],
+        rain_rate: float,
+        foliage_density: float,
+        interfering_positions: Optional[Sequence[Sequence[float]]] = None,
+        interferer_rain_rates: Optional[Sequence[float]] = None,
+        interferer_foliage: Optional[Sequence[float]] = None,
+        beam_isolation_db: float = 20.0,
+        elevation: float = 45.0,
+        bandwidth_hz: float = 500e6,
+    ) -> float:
+        """
+        Estimate SINR (Signal-to-Interference-plus-Noise Ratio) in dB.
+
+        Models co-channel interference from adjacent beams or neighbouring
+        satellites that reuse the same frequency.  Each interferer's power
+        is attenuated by ``beam_isolation_db`` (the sidelobe-to-mainlobe
+        suppression of the receive antenna).
+
+        Args:
+            sat_pos:                 Desired satellite position (km).
+            rain_rate:               Rain rate for the desired link (mm/h).
+            foliage_density:         LAI for the desired link.
+            interfering_positions:   List of interfering satellite positions (km).
+                                     Defaults to empty (no interference).
+            interferer_rain_rates:   Rain rates for interfering links (mm/h).
+                                     If None, defaults to ``rain_rate`` for all.
+            interferer_foliage:      Foliage density for interfering links.
+                                     If None, defaults to ``foliage_density`` for all.
+            beam_isolation_db:       Receive antenna beam isolation (dB), i.e.
+                                     sidelobe suppression relative to the main beam.
+                                     Typical Ka-band dish: 20–30 dB.
+            elevation:               Elevation angle for the desired link (deg).
+            bandwidth_hz:            Noise bandwidth (Hz).
+
+        Returns:
+            SINR in dB.
+        """
+        if interfering_positions is None:
+            interfering_positions = []
+
+        n_interferers = len(interfering_positions)
+        if interferer_rain_rates is None:
+            interferer_rain_rates = [rain_rate] * n_interferers
+        if interferer_foliage is None:
+            interferer_foliage = [foliage_density] * n_interferers
+
+        # --- Desired signal power (dBW) ---
+        sat_pos_arr = np.asarray(sat_pos, dtype=float)
+        dist_desired = float(np.linalg.norm(sat_pos_arr))
+        if dist_desired <= 0:
+            dist_desired = 550.0
+
+        fspl_d = self.free_space_path_loss(dist_desired)
+        a_rain_d = slant_path_attenuation(
+            rain_rate, elevation, self.frequency_ghz, self.polarisation
+        )
+        a_foliage_d = self.foliage_loss_db_per_unit * max(0.0, foliage_density)
+        p_desired_dbw = (
+            self.tx_power_dbw
+            + self.tx_gain_dbi
+            + self.rx_gain_dbi
+            - fspl_d
+            - a_rain_d
+            - a_foliage_d
+        )
+
+        # --- Noise power (dBW) ---
+        noise_power_dbw = (
+            self.BOLTZMANN_DB
+            + 10 * math.log10(self.noise_temp_k)
+            + 10 * math.log10(bandwidth_hz)
+        )
+
+        # --- Interference power (linear W) ---
+        interference_w = 0.0
+        for i, ipos in enumerate(interfering_positions):
+            ipos_arr = np.asarray(ipos, dtype=float)
+            dist_i = float(np.linalg.norm(ipos_arr))
+            if dist_i <= 0:
+                dist_i = 550.0
+            fspl_i = self.free_space_path_loss(dist_i)
+            a_rain_i = slant_path_attenuation(
+                float(interferer_rain_rates[i]),
+                elevation,
+                self.frequency_ghz,
+                self.polarisation,
+            )
+            a_foliage_i = self.foliage_loss_db_per_unit * max(
+                0.0, float(interferer_foliage[i])
+            )
+            p_interferer_dbw = (
+                self.tx_power_dbw
+                + self.tx_gain_dbi
+                # Sidelobe suppression at the receiver
+                + (self.rx_gain_dbi - beam_isolation_db)
+                - fspl_i
+                - a_rain_i
+                - a_foliage_i
+            )
+            interference_w += 10.0 ** (p_interferer_dbw / 10.0)
+
+        noise_w = 10.0 ** (noise_power_dbw / 10.0)
+        p_desired_w = 10.0 ** (p_desired_dbw / 10.0)
+
+        sinr_w = p_desired_w / (interference_w + noise_w)
+        return 10.0 * math.log10(max(sinr_w, 1e-30))  # avoid log(0)
 
     def compute_rssi(self, sat_pos: Sequence[float]) -> float:
         """
