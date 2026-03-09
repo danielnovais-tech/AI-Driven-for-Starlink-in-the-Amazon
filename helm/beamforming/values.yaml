@@ -1,0 +1,129 @@
+# Default values for the beamforming inference service.
+# Override with: helm install beamforming ./helm/beamforming -f custom-values.yaml
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+image:
+  # Fully qualified image reference.
+  # Override with your registry, e.g.:
+  #   registry: ghcr.io/your-org
+  #   repository: ai-starlink-amazon
+  # Produces: ghcr.io/your-org/ai-starlink-amazon:0.2.0
+  registry: ""   # leave empty to use Docker Hub; set to "ghcr.io/your-org" etc.
+  repository: ai-starlink-amazon
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+replicaCount: 2  # At least 2 for high availability (Phase 2.2)
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9090"
+  prometheus.io/path: "/metrics"
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Container resources
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
+
+# ---------------------------------------------------------------------------
+# Controller runtime configuration
+# ---------------------------------------------------------------------------
+controller:
+  # Inference step interval (milliseconds); maps to STEP_INTERVAL_MS env var
+  stepIntervalMs: 500
+  # SNR threshold for outage detection (dB)
+  snrThresholdDb: 5.0
+  # Torch device: "cpu" or "cuda"
+  device: cpu
+  # Log level: DEBUG | INFO | WARNING | ERROR
+  logLevel: INFO
+  # Model registry path (PVC mount point)
+  modelRegistryPath: /models
+
+# ---------------------------------------------------------------------------
+# Metrics service (Prometheus scrape target)
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  metricsPort: 9090
+
+# ---------------------------------------------------------------------------
+# Horizontal Pod Autoscaler
+# ---------------------------------------------------------------------------
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+# ---------------------------------------------------------------------------
+# Liveness / readiness probes
+# ---------------------------------------------------------------------------
+livenessProbe:
+  exec:
+    command:
+      - python
+      - -c
+      - "import inference.online_controller"
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  failureThreshold: 3
+
+readinessProbe:
+  exec:
+    command:
+      - python
+      - -c
+      - "import inference.online_controller"
+  initialDelaySeconds: 5
+  periodSeconds: 15
+
+# ---------------------------------------------------------------------------
+# Persistent volume for model registry
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 5Gi
+  mountPath: /models
+
+# ---------------------------------------------------------------------------
+# Node scheduling
+# ---------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}

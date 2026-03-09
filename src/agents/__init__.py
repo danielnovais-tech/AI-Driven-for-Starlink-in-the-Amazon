@@ -7,6 +7,13 @@ from .a3c_agent import A3CWorker, run_a3c
 from .online_ppo import OnlinePPOAgent, PEROnlinePPOAgent
 from .per_buffer import PrioritizedReplayBuffer
 
+# torch-dependent federated learning module
+try:
+    from .federated_learner import SatelliteAgent, FederatedAggregator
+    _FEDERATED_AVAILABLE = True
+except ImportError:
+    _FEDERATED_AVAILABLE = False
+
 __all__ = [
     "BeamformingNetwork",
     "DQNAgent",
@@ -16,4 +23,6 @@ __all__ = [
     "OnlinePPOAgent",
     "PEROnlinePPOAgent",
     "PrioritizedReplayBuffer",
+    "SatelliteAgent",
+    "FederatedAggregator",
 ]

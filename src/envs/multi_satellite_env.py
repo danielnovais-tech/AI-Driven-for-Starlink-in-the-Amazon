@@ -6,10 +6,13 @@ satellites and decides which one to use at each step.  If the chosen
 satellite differs from the currently active one, a handover is executed
 and a penalty is applied to the reward.
 
-State (obs_dim = max_satellites × 4 + max_satellites):
+State (obs_dim = max_satellites × 4 + max_satellites [+ max_satellites if weather]):
     For each satellite i in [0, max_satellites):
         [SNR_i (dB), distance_i (km), elevation_i (deg), rain_rate_i (mm/h)]
     Followed by a one-hot vector indicating the currently active satellite.
+    If ``weather_forecast`` is provided, a forecast rain-rate vector of length
+    ``max_satellites`` is appended, giving the agent advance warning of
+    impending rain events.
 
 Action:
     Discrete – index of the target satellite (0 … max_satellites-1).
@@ -66,6 +69,15 @@ class MultiSatelliteEnv(gym.Env):
         handover_penalty:  Reward penalty applied when a handover occurs.
         lambda_latency:    Latency penalty weight.
         mu_outage:         Outage penalty weight.
+        weather_forecast:  Optional :class:`~data.weather_forecast.WeatherForecast`
+                           instance.  When provided, a ``max_satellites``-length
+                           vector of predicted rain rates is appended to each
+                           observation, enabling the agent to pre-position beams
+                           before rain events arrive.
+        forecast_horizon_s: Lookahead window (seconds) for the weather forecast
+                            appended to the state (default 300 s = 5 min).
+        sim_time_step_s:    Simulated time (seconds) advanced per :meth:`step`
+                            call; used to advance the forecast clock.
     """
 
     metadata = {"render_modes": []}
@@ -73,6 +85,9 @@ class MultiSatelliteEnv(gym.Env):
     # Normalisation constants for the observation vector
     _OBS_MEAN_PER_SAT = np.array([15.0, 600.0, 45.0, 5.0], dtype=np.float32)
     _OBS_STD_PER_SAT = np.array([10.0, 200.0, 20.0, 10.0], dtype=np.float32)
+    # Normalisation for forecast features (rain rate mm/h)
+    _FORECAST_MEAN = 5.0
+    _FORECAST_STD = 10.0
 
     def __init__(
         self,
@@ -85,6 +100,9 @@ class MultiSatelliteEnv(gym.Env):
         handover_penalty: float = 1.0,
         lambda_latency: float = 0.1,
         mu_outage: float = 10.0,
+        weather_forecast=None,
+        forecast_horizon_s: float = 300.0,
+        sim_time_step_s: float = 0.5,
     ) -> None:
         super().__init__()
         self.channel = channel_model
@@ -96,9 +114,16 @@ class MultiSatelliteEnv(gym.Env):
         self.handover_penalty = handover_penalty
         self.lambda_latency = lambda_latency
         self.mu_outage = mu_outage
+        self.weather_forecast = weather_forecast
+        self.forecast_horizon_s = forecast_horizon_s
+        self.sim_time_step_s = sim_time_step_s
+        self._sim_time: float = 0.0
 
         # State: [SNR, dist, elev, rain] × max_sats + one-hot current
-        obs_dim = max_satellites * 4 + max_satellites
+        #   + (optional) forecast rain × max_sats
+        base_obs_dim = max_satellites * 4 + max_satellites
+        forecast_dim = max_satellites if weather_forecast is not None else 0
+        obs_dim = base_obs_dim + forecast_dim
         self.observation_space = spaces.Box(
             low=-10.0, high=10.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -109,6 +134,11 @@ class MultiSatelliteEnv(gym.Env):
         self._obs_mean = np.concatenate([self._obs_mean, np.zeros(max_satellites, dtype=np.float32)])
         self._obs_std = np.tile(self._OBS_STD_PER_SAT, max_satellites)
         self._obs_std = np.concatenate([self._obs_std, np.ones(max_satellites, dtype=np.float32)])
+        if weather_forecast is not None:
+            forecast_mean = np.full(max_satellites, self._FORECAST_MEAN, dtype=np.float32)
+            forecast_std = np.full(max_satellites, self._FORECAST_STD, dtype=np.float32)
+            self._obs_mean = np.concatenate([self._obs_mean, forecast_mean])
+            self._obs_std = np.concatenate([self._obs_std, forecast_std])
 
         # Internal state
         self.visible_sats: List[np.ndarray] = []
@@ -125,6 +155,7 @@ class MultiSatelliteEnv(gym.Env):
         options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         super().reset(seed=seed)
+        self._sim_time = 0.0
         self.visible_sats = [
             np.asarray(s, dtype=np.float64)
             for s in self.telemetry.get_visible_satellites()
@@ -138,6 +169,9 @@ class MultiSatelliteEnv(gym.Env):
         self, action: int
     ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         target_idx = int(action)
+
+        # Advance simulation clock
+        self._sim_time += self.sim_time_step_s
 
         # Update visible satellites (orbital movement)
         self.visible_sats = [
@@ -203,7 +237,22 @@ class MultiSatelliteEnv(gym.Env):
         if self.current_sat_idx < len(self.visible_sats):
             one_hot[self.current_sat_idx] = 1.0
 
-        full = np.concatenate([raw, one_hot])
+        parts = [raw, one_hot]
+
+        # Append weather forecast features if a forecast provider is available
+        if self.weather_forecast is not None:
+            forecast_raw = np.zeros(self.max_satellites, dtype=np.float32)
+            for i in range(self.max_satellites):
+                if i < len(self.visible_sats):
+                    sat = self.visible_sats[i]
+                    forecast_raw[i] = float(
+                        self.weather_forecast.get_forecast(
+                            sat, self._sim_time, self.forecast_horizon_s
+                        )
+                    )
+            parts.append(forecast_raw)
+
+        full = np.concatenate(parts)
         # Normalise
         return ((full - self._obs_mean) / self._obs_std).astype(np.float32)
 
