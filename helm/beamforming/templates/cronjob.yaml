@@ -1,0 +1,67 @@
+{{- if .Values.retraining.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "beamforming.fullname" . }}-retrain
+  labels:
+    {{- include "beamforming.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retrain
+spec:
+  schedule: {{ .Values.retraining.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "beamforming.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: retrain
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "beamforming.serviceAccountName" . }}
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
+          containers:
+            - name: retrain
+              image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command:
+                - python
+                - scripts/retrain_job.py
+                - --registry
+                - {{ .Values.controller.modelRegistryPath }}
+                - --model-name
+                - {{ .Values.retraining.modelName | quote }}
+                - --n-episodes
+                - {{ .Values.retraining.nEpisodes | quote }}
+                - --rounds
+                - {{ .Values.retraining.federatedRounds | quote }}
+                - --outage-threshold
+                - {{ .Values.retraining.outageThreshold | quote }}
+              env:
+                - name: PYTHONPATH
+                  value: "/app/src"
+                - name: MODEL_REGISTRY_PATH
+                  value: {{ .Values.controller.modelRegistryPath | quote }}
+              resources:
+                {{- toYaml .Values.retraining.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.securityContext | nindent 16 }}
+              volumeMounts:
+                - name: models
+                  mountPath: {{ .Values.persistence.mountPath }}
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: models
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ include "beamforming.fullname" . }}-models
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            - name: tmp
+              emptyDir: {}
+{{- end }}

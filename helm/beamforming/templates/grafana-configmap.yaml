@@ -1,0 +1,12 @@
+{{- if .Values.grafana.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "beamforming.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "beamforming.labels" . | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  beamforming-dashboard.json: |
+    {{ .Files.Get "grafana-dashboard.json" | indent 4 }}
+{{- end }}

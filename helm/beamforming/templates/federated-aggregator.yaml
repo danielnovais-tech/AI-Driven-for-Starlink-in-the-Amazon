@@ -1,0 +1,86 @@
+{{- if .Values.federatedAggregator.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "beamforming.fullname" . }}-fed-aggregator
+  labels:
+    {{- include "beamforming.labels" . | nindent 4 }}
+    app.kubernetes.io/component: federated-aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "beamforming.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: federated-aggregator
+  template:
+    metadata:
+      labels:
+        {{- include "beamforming.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: federated-aggregator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: {{ include "beamforming.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: fed-aggregator
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "agents.federated_learner"]
+          env:
+            - name: LOG_LEVEL
+              value: {{ .Values.controller.logLevel | quote }}
+            - name: MODEL_REGISTRY_PATH
+              value: {{ .Values.controller.modelRegistryPath | quote }}
+            - name: FEDERATED_ROUNDS
+              value: {{ .Values.federatedAggregator.rounds | quote }}
+            - name: METRICS_PORT
+              value: "9091"
+            - name: PYTHONPATH
+              value: "/app/src"
+          ports:
+            - name: fed-metrics
+              containerPort: 9091
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.federatedAggregator.resources | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: {{ .Values.persistence.mountPath }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: models
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "beamforming.fullname" . }}-models
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "beamforming.fullname" . }}-fed-aggregator
+  labels:
+    {{- include "beamforming.labels" . | nindent 4 }}
+    app.kubernetes.io/component: federated-aggregator
+spec:
+  type: ClusterIP
+  ports:
+    - port: 9091
+      targetPort: fed-metrics
+      protocol: TCP
+      name: fed-metrics
+  selector:
+    {{- include "beamforming.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: federated-aggregator
+{{- end }}
