@@ -81,6 +81,38 @@ def quantize_dynamic(model: torch.nn.Module) -> torch.nn.Module:
     )
 
 
+def prune_model(
+    model: torch.nn.Module, prune_ratio: float = 0.3
+) -> torch.nn.Module:
+    """
+    Apply L1-unstructured pruning to all Linear layers and make it permanent.
+
+    Removes ``prune_ratio`` fraction of the smallest-magnitude weights in
+    each Linear layer, replacing them with zeros.  The pruning mask is then
+    made permanent (weights are zeroed in-place and the mask hook is removed)
+    so the pruned model behaves like a standard sparse model.
+
+    Args:
+        model:       PyTorch model to prune (modified in-place and returned).
+        prune_ratio: Fraction of connections to prune per layer (0.0–1.0).
+
+    Returns:
+        The pruned model (same object, modified in-place).
+    """
+    try:
+        import torch.nn.utils.prune as _prune
+    except ImportError:
+        print("  [SKIP] torch.nn.utils.prune not available; pruning skipped.")
+        return model
+
+    for _, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            _prune.l1_unstructured(module, name="weight", amount=prune_ratio)
+            # Make the pruning permanent (remove the re-parametrisation hook)
+            _prune.remove(module, "weight")
+    return model
+
+
 def export_onnx(model: torch.nn.Module, input_tensor: torch.Tensor, onnx_path: str) -> None:
     """
     Export a PyTorch model to ONNX format.
@@ -195,6 +227,8 @@ def _parse_args(argv=None):
                         help="Number of satellite nodes for GNN benchmark.")
     parser.add_argument("--gnn-hidden", type=int, default=64,
                         help="Hidden dimension for GNN benchmark.")
+    parser.add_argument("--prune-ratio", type=float, default=0.3,
+                        help="L1 unstructured pruning ratio for Linear layers (0–1, default 0.3).")
     return parser.parse_args(argv)
 
 
@@ -213,6 +247,12 @@ def main(argv=None):
     # --- PyTorch FP32 ---
     t_pt = benchmark_pytorch(model, dummy_input, args.n_runs)
     print(f"{'PyTorch CPU (float32)':<40} {t_pt:>17.3f}")
+
+    # --- L1 pruned (make a fresh copy so the original model is untouched) ---
+    import copy as _copy
+    model_pruned = prune_model(_copy.deepcopy(model), prune_ratio=args.prune_ratio)
+    t_pruned = benchmark_pytorch(model_pruned, dummy_input, args.n_runs)
+    print(f"{'PyTorch CPU (L1 pruned {:.0%})':<40} {t_pruned:>17.3f}".format(args.prune_ratio))
 
     # --- PyTorch INT8 dynamic quantisation ---
     model_q = quantize_dynamic(model)
@@ -240,7 +280,7 @@ def main(argv=None):
     threshold_ms = 500.0
     all_ok = all(
         v < threshold_ms
-        for v in [t_pt, t_q, t_gnn]
+        for v in [t_pt, t_pruned, t_q, t_gnn]
         if not np.isnan(v)
     )
     status = "PASS" if all_ok else "FAIL"

@@ -202,6 +202,94 @@
       ],
       "title": "Decision Rate (1-min)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "id": 200,
+      "title": "Explainability & Feature Attribution",
+      "type": "row"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
+      "id": 201,
+      "options": {
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "expr": "topk(5, beamforming_feature_importance)",
+          "legendFormat": "{{feature}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top Feature Importances (latest)",
+      "description": "Gradient-based attribution scores for the top-5 state features influencing the agent's action. Higher = more influential.",
+      "type": "bargauge"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.7 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
+      "id": 202,
+      "options": { "colorMode": "background", "graphMode": "area" },
+      "targets": [
+        {
+          "expr": "beamforming_gnn_top_node_score",
+          "legendFormat": "Top satellite node score",
+          "refId": "A"
+        }
+      ],
+      "title": "GNN Top Node Importance Score",
+      "description": "L2 norm of the gradient w.r.t. the most-influential satellite node in the GNN graph. Peaks may indicate critical handover decisions.",
+      "type": "stat"
+    },
+    {
+      "datasource": "${DS_PROMETHEUS}",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 49 },
+      "id": 203,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "expr": "rate(beamforming_explanation_errors_total[5m])",
+          "legendFormat": "Explanation errors/s",
+          "refId": "A"
+        }
+      ],
+      "title": "Explainability Error Rate",
+      "description": "Rate of failed explanation computations. Non-zero values indicate the explainer is raising exceptions; check logs for details.",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -214,5 +302,5 @@
   "timezone": "browser",
   "title": "Starlink Amazon – Beamforming Controller",
   "uid": "starlink-amazon-beamforming",
-  "version": 1
+  "version": 2
 }

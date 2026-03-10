@@ -12,7 +12,7 @@ image:
   # Produces: ghcr.io/your-org/ai-starlink-amazon:0.2.0
   registry: ""   # leave empty to use Docker Hub; set to "ghcr.io/your-org" etc.
   repository: ai-starlink-amazon
-  tag: "0.2.0"
+  tag: "0.3.0"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -173,3 +173,34 @@ prometheusRule:
 # ---------------------------------------------------------------------------
 grafana:
   enabled: false   # set to true when Grafana sidecar is configured
+
+# ---------------------------------------------------------------------------
+# Federated Aggregator (Phase 2 – FL pipeline)
+# ---------------------------------------------------------------------------
+federatedAggregator:
+  enabled: true
+  # Number of federated rounds per retraining cycle
+  rounds: 5
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1000m"
+      memory: "2Gi"
+
+# ---------------------------------------------------------------------------
+# PodDisruptionBudget (ensures HA during node drain / upgrades)
+# ---------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  # Keep at least 1 inference pod running at all times
+  minAvailable: 1
+
+# ---------------------------------------------------------------------------
+# Explainability (feature attribution per decision)
+# ---------------------------------------------------------------------------
+controller:
+  explainability:
+    enabled: false       # set to true to enable per-step explanations
+    method: smooth_grad  # vanilla | ig | smooth_grad

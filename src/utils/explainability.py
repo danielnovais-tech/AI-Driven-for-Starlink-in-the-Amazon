@@ -207,3 +207,226 @@ def feature_importance_summary(
 
     mean_importances = aggregated / n
     return dict(zip(feature_names, mean_importances.tolist()))
+
+
+# ---------------------------------------------------------------------------
+# GNN node importance (GradCAM-style)
+# ---------------------------------------------------------------------------
+
+def gnn_node_importance(
+    agent,
+    graph_obs,
+    node_type: str = "sat",
+    feature_names: Optional[list] = None,
+    device: str = "cpu",
+) -> dict:
+    """
+    Compute per-node and per-feature importance scores for a GNN agent.
+
+    Uses input-gradient saliency (∂output/∂node_features) to score each
+    satellite node and each feature dimension.  The method is analogous to
+    ``vanilla_saliency`` but operates on the heterogeneous graph input used
+    by :class:`~agents.gnn_ppo_agent.GNNPPOAgent`.
+
+    Requirements:
+        ``torch_geometric`` must be installed.
+
+    Args:
+        agent:         A :class:`~agents.gnn_ppo_agent.GNNPPOAgent` whose
+                       ``net`` has a ``forward_actor`` method or standard
+                       ``forward`` returning ``(action_logits, value)``.
+        graph_obs:     A ``HeteroData`` graph observation as produced by
+                       :class:`~inference.online_controller.GNNBeamController`.
+        node_type:     Node type whose features are differentiated
+                       (default ``"sat"``).
+        feature_names: Optional list of feature names for the node feature
+                       vector (e.g. ``["snr", "distance", "elevation",
+                       "rain_rate"]``).  Defaults to ``["f_0", "f_1", ...]``.
+        device:        Torch device string.
+
+    Returns:
+        Dictionary with keys:
+            ``node_scores``    – list of per-node importance floats (L2 norm
+                                 of the gradient w.r.t. each node's features).
+            ``feature_scores`` – dict mapping feature name → mean absolute
+                                 gradient across all nodes.
+            ``top_node``       – index of the most important satellite node.
+            ``top_features``   – list of (feature_name, score) sorted by score
+                                 in descending order.
+    """
+    try:
+        import torch as _torch
+    except ImportError as exc:
+        raise ImportError("gnn_node_importance requires torch.") from exc
+
+    net = agent.net
+    net.eval()
+
+    # Deep-copy the graph so the differentiable x does not alias the original
+    # object's tensors, preventing unintended side effects on shared data.
+    import copy
+    data = copy.deepcopy(graph_obs)
+
+    # Enable gradient tracking for node features
+    x = data[node_type].x.to(device).detach().clone().requires_grad_(True)
+    # The differentiable node features are already set in data above
+
+    # Forward pass
+    try:
+        logits, _value = net(data)
+    except Exception:
+        # Fallback: some GNN nets expose get_action internals differently
+        out = net(data)
+        logits = out[0] if isinstance(out, tuple) else out
+
+    # Differentiate w.r.t. selected node features
+    output = logits.sum()
+    net.zero_grad()
+    if x.grad is not None:
+        x.grad.zero_()
+    output.backward()
+
+    grad = x.grad.detach().cpu().numpy()  # shape: (n_nodes, n_features)
+    n_nodes, n_features = grad.shape
+
+    # Per-node importance: L2 norm of gradient across features
+    node_scores = [float(np.linalg.norm(grad[i])) for i in range(n_nodes)]
+    top_node = int(np.argmax(node_scores))
+
+    # Per-feature importance: mean absolute gradient across nodes
+    if feature_names is None:
+        feature_names = [f"f_{i}" for i in range(n_features)]
+    feat_scores = {
+        feature_names[j]: float(np.mean(np.abs(grad[:, j])))
+        for j in range(min(n_features, len(feature_names)))
+    }
+    top_features = sorted(feat_scores.items(), key=lambda kv: kv[1], reverse=True)
+
+    return {
+        "node_scores": node_scores,
+        "feature_scores": feat_scores,
+        "top_node": top_node,
+        "top_features": top_features,
+    }
+
+
+# ---------------------------------------------------------------------------
+# DecisionExplainer: integrates explainability into the controller loop
+# ---------------------------------------------------------------------------
+
+class DecisionExplainer:
+    """
+    Wraps explainability calls and formats results for structured logging.
+
+    Designed to be embedded in :class:`~inference.online_controller.OnlineBeamController`
+    (or any subclass) and called once per ``step()`` to produce an
+    ``explanation`` dict that is included in the step result and emitted
+    to the structured log.
+
+    For flat-state agents (PPO, DQN) the explanation is a feature-importance
+    summary produced by :func:`smooth_grad`.  For GNN agents it additionally
+    includes per-node scores produced by :func:`gnn_node_importance`.
+
+    Args:
+        agent:         The DRL agent (must have a ``net`` attribute for
+                       flat-state agents; must have ``get_action`` for GNN).
+        feature_names: State feature names for flat-state attribution.
+        method:        Attribution method for flat-state agents:
+                       ``"vanilla"``, ``"ig"``, or ``"smooth_grad"``
+                       (default).
+        gnn_node_feat_names: Feature names for GNN node features.
+        device:        Torch device string.
+        enabled:       If ``False``, :meth:`explain` returns an empty dict
+                       immediately (zero overhead).
+    """
+
+    def __init__(
+        self,
+        agent,
+        feature_names: Optional[list] = None,
+        method: str = "smooth_grad",
+        gnn_node_feat_names: Optional[list] = None,
+        device: str = "cpu",
+        enabled: bool = True,
+    ) -> None:
+        self.agent = agent
+        self.feature_names = feature_names
+        self.method = method
+        self.gnn_node_feat_names = gnn_node_feat_names or ["snr", "distance", "elevation", "rain_rate"]
+        self.device = device
+        self.enabled = enabled
+
+    def explain(self, state_or_graph, action) -> dict:
+        """
+        Produce an explanation for the given state/graph and action.
+
+        Args:
+            state_or_graph: Either a 1-D numpy state array (flat agents) or
+                            a ``HeteroData`` graph (GNN agents).
+            action:         The action selected by the agent (for context).
+
+        Returns:
+            Explanation dictionary:
+                ``method``          – attribution method used.
+                ``feature_scores``  – feature name → importance score.
+                ``top_features``    – top-3 (name, score) pairs.
+                ``action``          – the action that was explained.
+                For GNN agents additionally:
+                ``node_scores``     – per-satellite-node importance.
+                ``top_node``        – index of most important satellite.
+        """
+        if not self.enabled:
+            return {}
+
+        explanation: dict = {"method": self.method, "action": action}
+
+        # Detect GNN agent by checking if the input is a HeteroData graph
+        is_graph = _is_heterodata(state_or_graph)
+
+        if is_graph:
+            try:
+                result = gnn_node_importance(
+                    self.agent,
+                    state_or_graph,
+                    node_type="sat",
+                    feature_names=self.gnn_node_feat_names,
+                    device=self.device,
+                )
+                explanation["method"] = "gnn_gradient"
+                explanation.update(result)
+                explanation["top_features"] = [
+                    (k, v) for k, v in result["top_features"][:3]
+                ]
+            except Exception as exc:  # noqa: BLE001
+                explanation["error"] = str(exc)
+        else:
+            try:
+                net = getattr(self.agent, "net", None)
+                if net is not None:
+                    state = np.asarray(state_or_graph, dtype=np.float32)
+                    if self.method == "ig":
+                        attr = np.abs(integrated_gradients(net, state, device=self.device))
+                    elif self.method == "vanilla":
+                        attr = vanilla_saliency(net, state, device=self.device)
+                    else:
+                        attr = smooth_grad(net, state, device=self.device)
+
+                    n_feat = len(attr)
+                    names = self.feature_names or [f"f_{i}" for i in range(n_feat)]
+                    feat_scores = {names[i]: float(attr[i]) for i in range(min(n_feat, len(names)))}
+                    top_feats = sorted(feat_scores.items(), key=lambda kv: kv[1], reverse=True)
+                    explanation["feature_scores"] = feat_scores
+                    explanation["top_features"] = top_feats[:3]
+            except Exception as exc:  # noqa: BLE001
+                explanation["error"] = str(exc)
+
+        return explanation
+
+
+def _is_heterodata(obj) -> bool:
+    """Return True if ``obj`` is a torch_geometric HeteroData instance."""
+    try:
+        from torch_geometric.data import HeteroData
+        return isinstance(obj, HeteroData)
+    except ImportError:
+        return False

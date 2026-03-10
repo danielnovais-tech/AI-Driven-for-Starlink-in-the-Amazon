@@ -6,14 +6,16 @@ description: |
 
   Deploys:
     - Inference controller Deployment (one replica per satellite cluster)
+    - Federated Aggregator Deployment + Service (FL pipeline)
     - Prometheus metrics Service (port 9090)
     - Horizontal Pod Autoscaler (CPU-based)
+    - PodDisruptionBudget (HA during rolling upgrades)
     - ConfigMap for runtime parameters
     - ServiceAccount with minimal RBAC
 
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.3.0"
 
 keywords:
   - satellite

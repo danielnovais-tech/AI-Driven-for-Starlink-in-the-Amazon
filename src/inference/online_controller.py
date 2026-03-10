@@ -116,6 +116,7 @@ class OnlineBeamController:
         device: str = "cpu",
         snr_threshold_db: float = 5.0,
         max_failures: int = 3,
+        explainer=None,
     ) -> None:
         self.agent = agent
         self.telemetry = telemetry_stream
@@ -130,6 +131,8 @@ class OnlineBeamController:
 
         self._fallback = FallbackPolicy()
         self._logger = StructuredLogger("inference.controller")
+        # Optional DecisionExplainer; if None, explanations are skipped
+        self._explainer = explainer
 
         # Health tracking
         self.consecutive_failures: int = 0
@@ -222,6 +225,21 @@ class OnlineBeamController:
         self.state_history.append(state)
         self.action_history.append(action)
 
+        # Optional per-step explanation (audit / dashboard)
+        explanation: Dict[str, Any] = {}
+        if self._explainer is not None and not used_fallback:
+            try:
+                explanation = self._explainer.explain(state, action)
+                self._logger.debug(
+                    "Step explanation",
+                    event="explanation",
+                    step=self._total_steps,
+                    **{k: v for k, v in explanation.items()
+                       if k not in ("feature_scores", "node_scores")},
+                )
+            except Exception:  # noqa: BLE001
+                pass  # Explanation errors must never affect control flow
+
         return {
             "action": action,
             "state": state,
@@ -229,6 +247,7 @@ class OnlineBeamController:
             "rain": rain,
             "fallback": used_fallback,
             "latency_ms": latency_ms,
+            "explanation": explanation,
         }
 
     def apply_beam_steering(self, action) -> None:

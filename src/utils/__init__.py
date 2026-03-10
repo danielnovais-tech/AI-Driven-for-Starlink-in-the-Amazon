@@ -14,6 +14,8 @@ try:
         integrated_gradients,
         smooth_grad,
         feature_importance_summary,
+        gnn_node_importance,
+        DecisionExplainer,
     )
     _EXPLAINABILITY_AVAILABLE = True
 except ImportError:
@@ -33,4 +35,6 @@ __all__ = [
     "integrated_gradients",
     "smooth_grad",
     "feature_importance_summary",
+    "gnn_node_importance",
+    "DecisionExplainer",
 ]

@@ -184,6 +184,10 @@ class MultiSatelliteEnv(gym.Env):
         if target_idx >= n_vis:
             target_idx = self._nearest_satellite_idx()
 
+        # Clamp to valid range (guards against actions exceeding visible count
+        # or max_satellites; both could produce an out-of-bounds index).
+        target_idx = min(target_idx, max(n_vis - 1, 0), self.max_satellites - 1)
+
         handover = target_idx != self.current_sat_idx
         self.current_sat_idx = target_idx
 
@@ -234,8 +238,9 @@ class MultiSatelliteEnv(gym.Env):
                 raw[base + 3] = 0.0
 
         one_hot = np.zeros(self.max_satellites, dtype=np.float32)
-        if self.current_sat_idx < len(self.visible_sats):
-            one_hot[self.current_sat_idx] = 1.0
+        clamped_idx = min(self.current_sat_idx, self.max_satellites - 1)
+        if clamped_idx < len(self.visible_sats):
+            one_hot[clamped_idx] = 1.0
 
         parts = [raw, one_hot]
 
