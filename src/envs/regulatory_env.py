@@ -267,6 +267,67 @@ class RegulatoryEnv(gym.Wrapper):
             "max_steering_rad": self._max_steering_rad,
         }
 
+    def compliance_report(self) -> Dict[str, Any]:
+        """
+        Return a structured compliance report for regulatory documentation.
+
+        The report serialises all constraint parameters and their regulatory
+        basis, suitable for submission to Anatel / FCC or internal audit.
+
+        Returns:
+            Dictionary with the following sections:
+
+            ``constraints``
+                List of constraint dicts, each containing:
+                ``name``, ``parameter``, ``value``, ``unit``,
+                ``regulatory_basis``, and ``enforcement``.
+
+            ``statistics``
+                Runtime statistics (total violations, step count, etc.)
+
+            ``overall_compliant``
+                ``True`` if zero violations were recorded.
+        """
+        return {
+            "overall_compliant": self.total_violations == 0,
+            "constraints": [
+                {
+                    "name": "Maximum EIRP",
+                    "parameter": "max_eirp_dbw",
+                    "value": self.max_eirp_dbw,
+                    "unit": "dBW",
+                    "regulatory_basis": (
+                        "ITU-R S.580-6 / FCC Part 25 §25.218 / "
+                        "Anatel Resolução 723/2020 Art. 12"
+                    ),
+                    "enforcement": "Power fraction clipped to prevent EIRP exceedance",
+                },
+                {
+                    "name": "Minimum Elevation Angle",
+                    "parameter": "min_elevation_deg",
+                    "value": self.min_elevation_deg,
+                    "unit": "degrees",
+                    "regulatory_basis": (
+                        "ITU-R SM.1448 / FCC Part 25 §25.209 / "
+                        "Anatel Resolução 723/2020 Art. 9"
+                    ),
+                    "enforcement": (
+                        "Beam phase clipped to ≤ "
+                        f"{math.degrees(self._max_steering_rad):.1f}° from boresight"
+                    ),
+                },
+                {
+                    "name": "Maximum Transmit Power",
+                    "parameter": "max_tx_power_dbw",
+                    "value": self.max_tx_power_dbw,
+                    "unit": "dBW",
+                    "regulatory_basis": "ITU Radio Regulations Art. 21",
+                    "enforcement": "Normalised power action capped at 1.0",
+                },
+            ],
+            "statistics": self.compliance_summary(),
+        }
+
 
 # ---------------------------------------------------------------------------
 # Geospatial regulatory wrapper
@@ -470,3 +531,35 @@ class GeoRegulatoryEnv(RegulatoryEnv):
         summary["geo_exclusion_violations"] = len(self.violation_log)
         summary["n_exclusion_zones"] = len(self.exclusion_zones)
         return summary
+
+    def compliance_report(self) -> Dict[str, Any]:
+        """
+        Return a structured compliance report including geospatial constraints.
+
+        Extends the parent :meth:`RegulatoryEnv.compliance_report` with the
+        list of active exclusion zones and geo-exclusion violation count.
+        """
+        report = super().compliance_report()
+        report["overall_compliant"] = (
+            report["overall_compliant"] and len(self.violation_log) == 0
+        )
+        report["constraints"].append({
+            "name": "Geographic Exclusion Zones",
+            "parameter": "exclusion_zones",
+            "value": len(self.exclusion_zones),
+            "unit": "zones",
+            "regulatory_basis": (
+                "ITU-R S.1429 / Anatel Resolução 723/2020 Art. 14 – "
+                "Radio-quiet zones and coordination areas"
+            ),
+            "enforcement": (
+                "Beam re-routed to best compliant satellite when target "
+                "sub-satellite point falls within an exclusion zone"
+            ),
+        })
+        report["exclusion_zones"] = [
+            {"name": z.name, "n_vertices": len(z.vertices), "reason": z.reason}
+            for z in self.exclusion_zones
+        ]
+        report["geo_violation_log_count"] = len(self.violation_log)
+        return report
