@@ -1,7 +1,8 @@
 """Gymnasium MDP environments sub-package."""
 
 from .multi_satellite_env import MultiSatelliteEnv
-from .regulatory_env import RegulatoryEnv
+from .regulatory_env import RegulatoryEnv, ExclusionZone, GeoRegulatoryEnv
+from .traffic_env import TrafficAwareMultiSatelliteEnv
 
 # h5py / torch dependent modules: imported conditionally so that the rest of
 # the package remains usable in environments where those are not installed.
@@ -29,4 +30,7 @@ __all__ = [
     "MultiSatelliteEnv",
     "GNNBeamformingEnv",
     "RegulatoryEnv",
+    "ExclusionZone",
+    "GeoRegulatoryEnv",
+    "TrafficAwareMultiSatelliteEnv",
 ]

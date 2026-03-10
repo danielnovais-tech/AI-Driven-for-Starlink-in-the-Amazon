@@ -405,3 +405,95 @@ def make_propagator(
         inclination_deg=inclination_deg,
         seed=seed,
     )
+
+
+# ---------------------------------------------------------------------------
+# High-level telemetry adapter for MultiSatelliteEnv
+# ---------------------------------------------------------------------------
+
+class StarlinkConstellationTelemetry:
+    """
+    High-level telemetry adapter wrapping a propagator for use with
+    :class:`~envs.multi_satellite_env.MultiSatelliteEnv`.
+
+    Exposes the ``get_visible_satellites()`` and ``ground_station_pos``
+    attributes expected by the environment, advancing the simulated time at
+    each call to simulate orbital motion.
+
+    Supports constellations of 5 to 1 584 satellites (matching the first
+    Starlink shell of 72 planes × 22 satellites).  For benchmarks requiring
+    100+ satellites, pass ``n_satellites=100`` or more.
+
+    Args:
+        n_satellites:    Total constellation size (default 72, Starlink-like).
+        altitude_km:     Orbital altitude (km).
+        inclination_deg: Inclination (degrees).
+        gs_lat_deg:      Ground-station latitude (degrees).
+        gs_lon_deg:      Ground-station longitude (degrees).
+        gs_alt_km:       Ground-station altitude (km above sea level).
+        min_elevation_deg: Minimum elevation for visibility (degrees).
+        time_step_s:     Simulated time advanced per ``get_visible_satellites``
+                         call (seconds, default 0.5 = one control step).
+        seed:            Random seed for initial orbital phases.
+        use_sgp4:        Whether to use the SGP4 back-end (requires ``sgp4``
+                         package; falls back to simplified propagator).
+    """
+
+    def __init__(
+        self,
+        n_satellites: int = 72,
+        altitude_km: float = 550.0,
+        inclination_deg: float = 53.0,
+        gs_lat_deg: float = AMAZON_GS_LAT_DEG,
+        gs_lon_deg: float = AMAZON_GS_LON_DEG,
+        gs_alt_km: float = AMAZON_GS_ALT_KM,
+        min_elevation_deg: float = 25.0,
+        time_step_s: float = 0.5,
+        seed: int = 0,
+        use_sgp4: bool = True,
+    ) -> None:
+        self.n_satellites = n_satellites
+        self.min_elevation_deg = min_elevation_deg
+        self.time_step_s = time_step_s
+
+        self.ground_station_pos = geodetic_to_ecef(gs_lat_deg, gs_lon_deg, gs_alt_km)
+        self._propagator = make_propagator(
+            n_satellites=n_satellites,
+            altitude_km=altitude_km,
+            inclination_deg=inclination_deg,
+            use_sgp4=use_sgp4,
+            seed=seed,
+        )
+        # Initialise to current wall-clock Unix timestamp so that Sgp4Propagator
+        # (which interprets t_sec as a Unix timestamp) starts at a realistic epoch.
+        # For SimplifiedPropagator, call reset(t_sec=0.0) to start at simulation
+        # time zero if wall-clock alignment is not required.
+        self._current_time: float = time.time()
+
+    def get_visible_satellites(self) -> List[np.ndarray]:
+        """
+        Return positions of currently visible satellites and advance the
+        simulated time by ``time_step_s``.
+
+        Returns:
+            List of (3,) numpy position arrays in km (ECEF/TEME).
+        """
+        visible = self._propagator.get_visible_satellites(
+            gs_pos=self.ground_station_pos,
+            t_sec=self._current_time,
+            min_elevation_deg=self.min_elevation_deg,
+        )
+        self._current_time += self.time_step_s
+        return visible
+
+    def reset(self, t_sec: Optional[float] = None, seed: Optional[int] = None) -> None:
+        """
+        Reset the simulation clock.
+
+        Args:
+            t_sec: New simulation start time (Unix timestamp).
+                   Defaults to the current wall-clock time.
+            seed:  Unused (accepted for API compatibility).
+        """
+        self._current_time = t_sec if t_sec is not None else time.time()
+

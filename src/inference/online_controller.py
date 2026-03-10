@@ -15,6 +15,13 @@ Production features:
     - **Metrics**: counters and histograms are updated in
       :data:`utils.metrics.GLOBAL_REGISTRY` on every step.
 
+Subclasses:
+    - :class:`GNNBeamController` – builds a ``HeteroData`` graph observation
+      from multi-satellite telemetry and feeds it to a :class:`GNNPPOAgent`.
+    - :class:`HardwareBeamController` – wires a
+      :class:`~hardware.phaser_driver.PhasedArrayDriver` into
+      :meth:`apply_beam_steering` for real phased-array integration.
+
 Typical usage::
 
     controller = OnlineBeamController(agent, telemetry, radar, foliage)
@@ -24,7 +31,7 @@ Typical usage::
 """
 
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -282,3 +289,304 @@ class OnlineBeamController:
         if isinstance(result, tuple):
             return result[0]
         return result
+
+
+# ---------------------------------------------------------------------------
+# GNN-aware controller subclass
+# ---------------------------------------------------------------------------
+
+class GNNBeamController(OnlineBeamController):
+    """
+    Online beam controller backed by a :class:`~agents.gnn_ppo_agent.GNNPPOAgent`.
+
+    Extends :class:`OnlineBeamController` to build a ``HeteroData`` graph
+    observation at each step from the multi-satellite telemetry stream and
+    pass it directly to the GNN agent, which selects the best satellite.
+
+    The ``telemetry_stream`` must additionally expose:
+        ``get_visible_satellites()`` → list of position arrays (km).
+        ``ground_station_pos``       → ground-station ECEF position (km).
+
+    The resulting action is the integer satellite index selected by the agent.
+    :meth:`apply_beam_steering` receives the satellite index; override it to
+    issue the corresponding hardware command.
+
+    Args:
+        agent:            A :class:`~agents.gnn_ppo_agent.GNNPPOAgent`
+                          (or any agent accepting a ``HeteroData`` graph).
+        telemetry_stream: Multi-satellite telemetry (see above).
+        radar_stream:     Rain-rate provider.
+        foliage_map:      LAI provider.
+        node_feature_dim: Number of features per satellite node in the graph
+                          (default 4: SNR, distance, elevation, rain_rate).
+        snr_threshold_db: Outage SNR threshold (dB).
+        max_failures:     Consecutive failure threshold before a watchdog warning.
+    """
+
+    def __init__(
+        self,
+        agent,
+        telemetry_stream,
+        radar_stream,
+        foliage_map,
+        node_feature_dim: int = 4,
+        snr_threshold_db: float = 5.0,
+        max_failures: int = 3,
+    ) -> None:
+        # Call super with dummy normalisation (flat state unused by GNN controller)
+        super().__init__(
+            agent=agent,
+            telemetry_stream=telemetry_stream,
+            radar_stream=radar_stream,
+            foliage_map=foliage_map,
+            snr_threshold_db=snr_threshold_db,
+            max_failures=max_failures,
+        )
+        self.node_feature_dim = node_feature_dim
+
+    # ------------------------------------------------------------------
+    # Override public step to use graph observations
+    # ------------------------------------------------------------------
+
+    def step(self) -> Dict[str, Any]:
+        """
+        Build a graph observation, run the GNN agent, and return the result.
+
+        Returns:
+            Dictionary with keys:
+                ``action``     – selected satellite index (int).
+                ``graph_obs``  – the ``HeteroData`` graph used for inference.
+                ``snr``        – SNR of the selected satellite (dB).
+                ``rain``       – rain rate at the selected satellite (mm/h).
+                ``fallback``   – True if the fallback policy was used.
+                ``latency_ms`` – wall-clock inference latency (ms).
+                ``n_visible``  – number of visible satellites.
+        """
+        t_start = time.perf_counter()
+        self._total_steps += 1
+        used_fallback = False
+
+        graph_obs, snr, rain, n_visible = self._build_graph_obs()
+
+        try:
+            result = self.agent.get_action(graph_obs, deterministic=True)
+            action = result[0] if isinstance(result, tuple) else result
+            # Normalise action to a flat array for fallback storage
+            _action_arr = np.array([float(action)], dtype=np.float32)
+            self._fallback.update(_action_arr)
+            self.consecutive_failures = 0
+        except Exception as exc:  # noqa: BLE001
+            self.consecutive_failures += 1
+            used_fallback = True
+            _metrics.increment("errors_total")
+            _metrics.increment("fallback_total")
+            reason = f"agent_error: {type(exc).__name__}: {exc}"
+            self._logger.log_fallback(reason, step=self._total_steps)
+            fallback_arr = self._fallback.get_action(np.zeros(1, dtype=np.float32))
+            action = int(fallback_arr[0])
+
+        latency_ms = (time.perf_counter() - t_start) * 1000.0
+
+        self.apply_beam_steering(action)
+
+        # Metrics
+        _metrics.increment("decisions_total")
+        _metrics.set_gauge("snr_db", snr)
+        _metrics.set_gauge("rain_rate_mmh", rain)
+        _metrics.observe("inference_latency_ms", latency_ms)
+
+        if snr < self.snr_threshold:
+            _metrics.increment("outages_total")
+            self._logger.log_outage(satellite_id=int(action), snr_db=snr,
+                                    step=self._total_steps)
+
+        if self.consecutive_failures >= self.max_failures:
+            self._logger.warning(
+                f"GNN controller health degraded: {self.consecutive_failures} "
+                "consecutive failures",
+                event="watchdog_alert",
+                consecutive_failures=self.consecutive_failures,
+            )
+
+        self.action_history.append(action)
+        self.state_history.append(graph_obs)
+
+        return {
+            "action": action,
+            "graph_obs": graph_obs,
+            "snr": snr,
+            "rain": rain,
+            "fallback": used_fallback,
+            "latency_ms": latency_ms,
+            "n_visible": n_visible,
+        }
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _build_graph_obs(self):
+        """
+        Construct a ``HeteroData`` graph from live telemetry.
+
+        Returns:
+            Tuple ``(graph, best_snr, best_rain, n_visible)``.
+        """
+        try:
+            import math as _math
+            import torch as _torch
+            from torch_geometric.data import HeteroData as _HeteroData
+        except ImportError as exc:
+            raise ImportError(
+                "GNNBeamController requires torch and torch_geometric. "
+                "Install with: pip install torch torch-geometric"
+            ) from exc
+
+        visible = [
+            np.asarray(s, dtype=np.float64)
+            for s in self.telemetry.get_visible_satellites()
+        ]
+        gs = np.asarray(self.telemetry.ground_station_pos, dtype=np.float64)
+
+        # Handle the empty-constellation case: create one dummy node so the
+        # graph is structurally valid.  The agent will receive zeroed features
+        # and should select satellite index 0 (which the fallback will correct).
+        if not visible:
+            visible = [np.zeros(3, dtype=np.float64)]
+
+        n_vis = len(visible)
+
+        # Named constants for the distance-based SNR approximation
+        _BASE_SNR_DB = 20.0          # nominal free-space SNR at 550 km altitude (dB)
+        _RAIN_ATT_FACTOR = 0.5       # dB per mm/h rain attenuation coefficient
+        _NOMINAL_ALT_KM = 550.0      # reference altitude for SNR approximation (km)
+        _DIST_PENALTY_SCALE = 100.0  # km per dB distance penalty scaling
+        _ELEV_EPSILON = 1e-9         # numerical guard for elevation computation
+
+        sat_feat = np.zeros((n_vis, self.node_feature_dim), dtype=np.float32)
+        best_snr = -999.0
+        best_rain = 0.0
+
+        for i, sat in enumerate(visible):
+            rain = float(self.radar.get_at_location(sat))
+            # Reuse channel model if possible; otherwise use a simple approximation
+            try:
+                snr = float(self.telemetry.get_current_snr())
+            except AttributeError:
+                # Fallback: distance-based SNR approximation
+                dist = float(np.linalg.norm(sat - gs))
+                snr = (_BASE_SNR_DB
+                       - rain * _RAIN_ATT_FACTOR
+                       - max(0.0, (dist - _NOMINAL_ALT_KM) / _DIST_PENALTY_SCALE))
+
+            dist_km = float(np.linalg.norm(sat - gs))
+            vec = sat - gs
+            gs_norm = float(np.linalg.norm(gs))
+            # Elevation angle: arcsin of the dot-product of the look-vector with
+            # the local vertical (ground-station position unit vector)
+            elev = (
+                _math.degrees(_math.asin(
+                    min(1.0, max(-1.0,
+                                 float(np.dot(vec, gs))
+                                 / (dist_km * gs_norm + _ELEV_EPSILON)))
+                ))
+                if dist_km > 1e-6 and gs_norm > 1e-6 else 90.0
+            )
+
+            sat_feat[i] = [snr, dist_km, elev, rain]
+            if snr > best_snr:
+                best_snr = snr
+                best_rain = rain
+
+        # Build HeteroData graph
+        data = _HeteroData()
+        data["sat"].x = _torch.FloatTensor(sat_feat)
+        data["sat"].num_nodes = n_vis
+        data["ground_station"].x = _torch.zeros(1, self.node_feature_dim)
+        data["ground_station"].num_nodes = 1
+        src = _torch.arange(n_vis, dtype=_torch.long)
+        dst = _torch.zeros(n_vis, dtype=_torch.long)
+        data["sat", "to", "ground_station"].edge_index = _torch.stack([src, dst], dim=0)
+
+        return data, float(best_snr), float(best_rain), n_vis
+
+
+# ---------------------------------------------------------------------------
+# Hardware-integrated controller subclass
+# ---------------------------------------------------------------------------
+
+class HardwareBeamController(OnlineBeamController):
+    """
+    Online beam controller that forwards commands to a physical phased-array.
+
+    Extends :class:`OnlineBeamController` by overriding
+    :meth:`apply_beam_steering` to call
+    :meth:`~hardware.phaser_driver.PhasedArrayDriver.apply_action_vector`
+    on a connected driver.
+
+    Args:
+        agent:            Trained DRL agent with ``get_action()``.
+        telemetry_stream: Telemetry interface.
+        radar_stream:     Radar interface.
+        foliage_map:      Foliage interface.
+        hw_driver:        A connected
+                          :class:`~hardware.phaser_driver.PhasedArrayDriver`
+                          instance.
+        **kwargs:         Forwarded to :class:`OnlineBeamController`.
+
+    Example::
+
+        from hardware.phaser_driver import EthernetPhasedArrayDriver
+        from inference.online_controller import HardwareBeamController
+
+        driver = EthernetPhasedArrayDriver(host="192.168.1.100")
+        driver.connect()
+        ctrl = HardwareBeamController(agent, telemetry, radar, foliage,
+                                      hw_driver=driver)
+        while True:
+            result = ctrl.step()
+            time.sleep(0.5)
+    """
+
+    def __init__(
+        self,
+        agent,
+        telemetry_stream,
+        radar_stream,
+        foliage_map,
+        hw_driver,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            agent=agent,
+            telemetry_stream=telemetry_stream,
+            radar_stream=radar_stream,
+            foliage_map=foliage_map,
+            **kwargs,
+        )
+        self._hw_driver = hw_driver
+
+    def apply_beam_steering(self, action) -> None:
+        """
+        Forward the action to the phased-array hardware driver.
+
+        For continuous actions (array of ≥ 4 elements), calls
+        :meth:`~hardware.phaser_driver.PhasedArrayDriver.apply_action_vector`.
+        For discrete actions (single integer), converts to a minimal
+        continuous command (phase=0, power=1, mcs=action%5, rb=50).
+
+        Args:
+            action: Continuous action array or discrete integer.
+        """
+        if isinstance(action, (int, np.integer)):
+            vec = np.array([0.0, 1.0, float(action % 5), 50.0], dtype=np.float32)
+        else:
+            vec = np.asarray(action, dtype=np.float32)
+        try:
+            self._hw_driver.apply_action_vector(vec)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                f"Hardware driver error: {exc}",
+                event="hw_driver_error",
+                step=self._total_steps,
+            )

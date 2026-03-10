@@ -138,6 +138,52 @@ def benchmark_onnx(onnx_path: str, input_numpy: np.ndarray, n_runs: int = 1000) 
 # Main
 # ---------------------------------------------------------------------------
 
+def benchmark_gnn_pytorch(n_sats: int = 5, hidden: int = 64, n_runs: int = 500) -> float:
+    """
+    Measure mean per-inference latency (ms) for :class:`~agents.gnn_ppo_agent.GNNPPOAgent`.
+
+    Requires ``torch_geometric``.  Returns ``float('nan')`` if unavailable.
+
+    Args:
+        n_sats:  Number of satellite nodes in the synthetic graph.
+        hidden:  Hidden dimension for the GAT layers.
+        n_runs:  Number of timed forward passes.
+
+    Returns:
+        Average latency in ms, or ``nan`` if ``torch_geometric`` is absent.
+    """
+    try:
+        import torch as _torch
+        from torch_geometric.data import HeteroData
+        from agents.gnn_ppo_agent import GNNPPOAgent
+    except ImportError:
+        print("  [SKIP] torch_geometric not installed; GNN benchmark skipped.")
+        return float("nan")
+
+    agent = GNNPPOAgent(node_features=4, hidden=hidden)
+    agent.net.eval()
+
+    # Build a synthetic graph
+    data = HeteroData()
+    data["sat"].x = _torch.randn(n_sats, 4)
+    data["sat"].num_nodes = n_sats
+    data["ground_station"].x = _torch.zeros(1, 4)
+    data["ground_station"].num_nodes = 1
+    src = _torch.arange(n_sats, dtype=_torch.long)
+    dst = _torch.zeros(n_sats, dtype=_torch.long)
+    data["sat", "to", "ground_station"].edge_index = _torch.stack([src, dst], dim=0)
+
+    # Warm-up
+    for _ in range(20):
+        agent.get_action(data, deterministic=True)
+
+    start = time.perf_counter()
+    for _ in range(n_runs):
+        agent.get_action(data, deterministic=True)
+    end = time.perf_counter()
+    return (end - start) / n_runs * 1000.0
+
+
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Benchmark BeamformingNetwork inference latency.")
     parser.add_argument("--n-runs", type=int, default=1000, help="Number of timed iterations.")
@@ -145,6 +191,10 @@ def _parse_args(argv=None):
     parser.add_argument("--action-dim", type=int, default=4, help="Action vector dimension.")
     parser.add_argument("--hidden", type=int, default=256, help="Hidden layer width.")
     parser.add_argument("--onnx-path", default="/tmp/beamforming_network.onnx", help="ONNX export path.")
+    parser.add_argument("--gnn-sats", type=int, default=5,
+                        help="Number of satellite nodes for GNN benchmark.")
+    parser.add_argument("--gnn-hidden", type=int, default=64,
+                        help="Hidden dimension for GNN benchmark.")
     return parser.parse_args(argv)
 
 
@@ -157,32 +207,40 @@ def main(argv=None):
     dummy_input = torch.randn(1, args.state_dim)
     dummy_numpy = dummy_input.numpy().astype(np.float32)
 
-    print(f"{'Backend':<35} {'Avg latency (ms)':>18}")
-    print("-" * 55)
+    print(f"{'Backend':<40} {'Avg latency (ms)':>18}")
+    print("-" * 60)
 
     # --- PyTorch FP32 ---
     t_pt = benchmark_pytorch(model, dummy_input, args.n_runs)
-    print(f"{'PyTorch CPU (float32)':<35} {t_pt:>17.3f}")
+    print(f"{'PyTorch CPU (float32)':<40} {t_pt:>17.3f}")
 
     # --- PyTorch INT8 dynamic quantisation ---
     model_q = quantize_dynamic(model)
     t_q = benchmark_pytorch(model_q, dummy_input, args.n_runs)
-    print(f"{'PyTorch CPU (int8 dynamic quant)':<35} {t_q:>17.3f}")
+    print(f"{'PyTorch CPU (int8 dynamic quant)':<40} {t_q:>17.3f}")
 
     # --- ONNX Runtime ---
+    t_onnx = float("nan")
     try:
         export_onnx(model, dummy_input, args.onnx_path)
         t_onnx = benchmark_onnx(args.onnx_path, dummy_numpy, args.n_runs)
         if not np.isnan(t_onnx):
-            print(f"{'ONNX Runtime CPU':<35} {t_onnx:>17.3f}")
+            print(f"{'ONNX Runtime CPU':<40} {t_onnx:>17.3f}")
     except Exception as exc:
         print(f"  [SKIP] ONNX export/benchmark skipped: {exc}")
+
+    # --- GNN agent ---
+    t_gnn = benchmark_gnn_pytorch(
+        n_sats=args.gnn_sats, hidden=args.gnn_hidden, n_runs=min(args.n_runs, 500)
+    )
+    if not np.isnan(t_gnn):
+        print(f"{'GNN PPO (torch_geometric CPU)':<40} {t_gnn:>17.3f}")
 
     print()
     threshold_ms = 500.0
     all_ok = all(
         v < threshold_ms
-        for v in [t_pt, t_q]
+        for v in [t_pt, t_q, t_gnn]
         if not np.isnan(v)
     )
     status = "PASS" if all_ok else "FAIL"
