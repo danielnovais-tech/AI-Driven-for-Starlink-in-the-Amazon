@@ -541,17 +541,27 @@ class HardwareBeamController(OnlineBeamController):
     Extends :class:`OnlineBeamController` by overriding
     :meth:`apply_beam_steering` to call
     :meth:`~hardware.phaser_driver.PhasedArrayDriver.apply_action_vector`
-    on a connected driver.
+    on a connected driver.  After each steering command the hardware
+    telemetry is read back and stored in :attr:`last_hw_telemetry` for
+    latency measurement and pointing validation.
+
+    Rain-attenuation injection:
+        Set ``inject_rain_attenuation_db`` to a non-zero value to subtract
+        a fixed attenuation from every SNR reading, simulating heavy-rain
+        propagation loss.  This is used in field test scenarios to verify
+        that the agent adapts its MCS / power allocation correctly.
 
     Args:
-        agent:            Trained DRL agent with ``get_action()``.
-        telemetry_stream: Telemetry interface.
-        radar_stream:     Radar interface.
-        foliage_map:      Foliage interface.
-        hw_driver:        A connected
-                          :class:`~hardware.phaser_driver.PhasedArrayDriver`
-                          instance.
-        **kwargs:         Forwarded to :class:`OnlineBeamController`.
+        agent:                    Trained DRL agent with ``get_action()``.
+        telemetry_stream:         Telemetry interface.
+        radar_stream:             Radar interface.
+        foliage_map:              Foliage interface.
+        hw_driver:                A connected
+                                  :class:`~hardware.phaser_driver.PhasedArrayDriver`
+                                  instance.
+        inject_rain_attenuation_db: Additional SNR penalty (dB) injected
+                                  on every step (0 = disabled).
+        **kwargs:                 Forwarded to :class:`OnlineBeamController`.
 
     Example::
 
@@ -574,6 +584,7 @@ class HardwareBeamController(OnlineBeamController):
         radar_stream,
         foliage_map,
         hw_driver,
+        inject_rain_attenuation_db: float = 0.0,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -584,6 +595,9 @@ class HardwareBeamController(OnlineBeamController):
             **kwargs,
         )
         self._hw_driver = hw_driver
+        self.inject_rain_attenuation_db = inject_rain_attenuation_db
+        # Most-recent hardware telemetry snapshot (updated after each steering cmd)
+        self.last_hw_telemetry = None
 
     def apply_beam_steering(self, action) -> None:
         """
@@ -594,6 +608,9 @@ class HardwareBeamController(OnlineBeamController):
         For discrete actions (single integer), converts to a minimal
         continuous command (phase=0, power=1, mcs=action%5, rb=50).
 
+        After sending the command, reads back hardware telemetry and stores
+        it in :attr:`last_hw_telemetry`.
+
         Args:
             action: Continuous action array or discrete integer.
         """
@@ -603,9 +620,26 @@ class HardwareBeamController(OnlineBeamController):
             vec = np.asarray(action, dtype=np.float32)
         try:
             self._hw_driver.apply_action_vector(vec)
+            # Read back telemetry for latency measurement and validation
+            self.last_hw_telemetry = self._hw_driver.read_telemetry()
         except Exception as exc:  # noqa: BLE001
             self._logger.warning(
                 f"Hardware driver error: {exc}",
                 event="hw_driver_error",
                 step=self._total_steps,
             )
+
+    def _collect_state(self):
+        """
+        Extend base state collection with rain-attenuation injection.
+
+        Subtracts :attr:`inject_rain_attenuation_db` from the SNR reading
+        to simulate heavy-rain propagation loss in field test scenarios.
+        """
+        normalised, raw = super()._collect_state()
+        if self.inject_rain_attenuation_db != 0.0:
+            # raw[0] is the SNR reading; apply attenuation injection
+            raw = raw.copy()
+            raw[0] = raw[0] - self.inject_rain_attenuation_db
+            normalised = ((raw - self.state_mean) / self.state_std).astype(np.float32)
+        return normalised, raw

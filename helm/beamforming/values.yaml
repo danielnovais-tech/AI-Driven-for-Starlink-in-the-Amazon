@@ -204,3 +204,44 @@ controller:
   explainability:
     enabled: false       # set to true to enable per-step explanations
     method: smooth_grad  # vanilla | ig | smooth_grad
+
+# ---------------------------------------------------------------------------
+# Production mode flag
+# ---------------------------------------------------------------------------
+production:
+  # Set to true to enable live data sources and stricter health checks.
+  # When false (default), synthetic/fallback data generators are used.
+  enabled: false
+
+# ---------------------------------------------------------------------------
+# Live data sources (used when production.enabled = true)
+# ---------------------------------------------------------------------------
+dataSources:
+  cptec:
+    # CPTEC/INPE rain-rate API (https://climanalise.cptec.inpe.br)
+    enabled: false   # set to true in production
+    baseUrl: "https://climanalise.cptec.inpe.br/~rclimatol/products/radar"
+    product: "MERGE_1H"
+    # Polling interval (seconds); 5 min is reasonable for operational use
+    refreshIntervalS: 300
+    timeoutS: 15
+
+  spacetrack:
+    # Space-Track.org TLE API – credentials stored in a Kubernetes Secret.
+    # Create the secret with:
+    #   kubectl create secret generic spacetrack-credentials \
+    #     --from-literal=username=YOUR_USERNAME \
+    #     --from-literal=password=YOUR_PASSWORD
+    enabled: false   # set to true in production
+    credentialsSecret: spacetrack-credentials
+    # NORAD IDs for the Starlink satellites of interest (comma-separated)
+    noradIds: "44713,44714,44715,44716,44717"
+    # Polling interval (seconds); TLEs are valid for ~hours
+    refreshIntervalS: 3600
+
+  networkTraffic:
+    # Internal traffic-metrics endpoint (Prometheus push-gateway or custom API)
+    enabled: false   # set to true when the metrics endpoint is available
+    endpointUrl: "http://traffic-metrics.monitoring.svc.cluster.local:9091/traffic"
+    refreshIntervalS: 5
+    timeoutS: 5

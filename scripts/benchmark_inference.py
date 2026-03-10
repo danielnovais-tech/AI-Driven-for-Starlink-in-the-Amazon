@@ -134,6 +134,83 @@ def export_onnx(model: torch.nn.Module, input_tensor: torch.Tensor, onnx_path: s
     )
 
 
+def export_tensorrt_stub(onnx_path: str, trt_path: str, fp16: bool = True) -> bool:
+    """
+    Convert an ONNX model to TensorRT engine (requires ``tensorrt`` package).
+
+    This function attempts to build a TensorRT engine from the exported ONNX
+    file using the Python ``tensorrt`` API.  If ``tensorrt`` is not installed
+    (typical in CPU-only environments), a clear ``[SKIP]`` message is printed
+    and the function returns ``False``.
+
+    Hardware recommendations:
+        - **NVIDIA Jetson Orin** (8 TOPS INT8): target for on-board satellite
+          use; expect < 1 ms inference latency for the BeamformingNetwork.
+          **Power budget** ≈ 10–15 W; **thermal envelope** limited to < 85 °C
+          junction temperature in a passively-cooled satellite enclosure.
+        - **Jetson AGX Xavier / Orin NX**: recommended for GNN agents
+          (higher memory bandwidth required for graph operations).
+          Draws 20–30 W at full load; suitable for larger LEO platforms.
+        - **x86 server with T4/A10G**: use for ground-station deployments;
+          full TensorRT FP16 or INT8 calibration possible.  No power/thermal
+          constraints relevant for satellite deployment.
+
+    Workflow::
+
+        onnx_path = "/tmp/beamforming.onnx"
+        trt_path  = "/tmp/beamforming.engine"
+        export_onnx(model, dummy_input, onnx_path)
+        ok = export_tensorrt_stub(onnx_path, trt_path, fp16=True)
+        # Deploy trt_path on target NVIDIA hardware with trt.Runtime
+
+    Args:
+        onnx_path: Path to an ONNX model exported by :func:`export_onnx`.
+        trt_path:  Destination path for the serialised TensorRT engine.
+        fp16:      If ``True``, enable FP16 precision mode (recommended for
+                   embedded NVIDIA GPUs; reduces latency by ~2×).
+
+    Returns:
+        ``True`` if the engine was built and saved; ``False`` if
+        ``tensorrt`` is unavailable or the build fails.
+    """
+    try:
+        import tensorrt as trt  # type: ignore[import]
+    except ImportError:
+        print(
+            "  [SKIP] tensorrt not installed; skip TensorRT build.\n"
+            "         Install on NVIDIA hardware: pip install tensorrt\n"
+            "         or via JetPack SDK Manager on Jetson devices."
+        )
+        return False
+
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(TRT_LOGGER)
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+    network = builder.create_network(network_flags)
+    parser = trt.OnnxParser(network, TRT_LOGGER)
+
+    with open(onnx_path, "rb") as f:
+        if not parser.parse(f.read()):
+            for i in range(parser.num_errors):
+                print(f"  TRT parse error: {parser.get_error(i)}")
+            return False
+
+    config = builder.create_builder_config()
+    if fp16 and builder.platform_has_fast_fp16:
+        config.set_flag(trt.BuilderFlag.FP16)
+
+    engine = builder.build_serialized_network(network, config)
+    if engine is None:
+        print("  [FAIL] TensorRT engine build failed.")
+        return False
+
+    with open(trt_path, "wb") as f:
+        f.write(engine)
+
+    print(f"  TensorRT engine saved to {trt_path}  (fp16={fp16})")
+    return True
+
+
 def benchmark_onnx(onnx_path: str, input_numpy: np.ndarray, n_runs: int = 1000) -> float:
     """
     Measure average per-inference latency (ms) for an ONNX Runtime session.
@@ -223,6 +300,8 @@ def _parse_args(argv=None):
     parser.add_argument("--action-dim", type=int, default=4, help="Action vector dimension.")
     parser.add_argument("--hidden", type=int, default=256, help="Hidden layer width.")
     parser.add_argument("--onnx-path", default="/tmp/beamforming_network.onnx", help="ONNX export path.")
+    parser.add_argument("--trt-path", default="/tmp/beamforming_network.engine",
+                        help="TensorRT engine output path (requires tensorrt package).")
     parser.add_argument("--gnn-sats", type=int, default=5,
                         help="Number of satellite nodes for GNN benchmark.")
     parser.add_argument("--gnn-hidden", type=int, default=64,
@@ -285,6 +364,13 @@ def main(argv=None):
     )
     status = "PASS" if all_ok else "FAIL"
     print(f"Latency target < {threshold_ms} ms: [{status}]")
+
+    # --- TensorRT export (NVIDIA hardware only) ---
+    if not np.isnan(t_onnx):
+        print()
+        print("Attempting TensorRT engine build …")
+        export_tensorrt_stub(args.onnx_path, args.trt_path, fp16=True)
+
     return 0 if all_ok else 1
 
 

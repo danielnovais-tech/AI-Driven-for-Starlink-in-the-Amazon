@@ -49,6 +49,42 @@ spec:
               value: {{ .Values.controller.modelRegistryPath | quote }}
             - name: PYTHONPATH
               value: "/app/src"
+            {{- if .Values.dataSources.cptec.enabled }}
+            - name: CPTEC_BASE_URL
+              value: {{ .Values.dataSources.cptec.baseUrl | quote }}
+            - name: CPTEC_REFRESH_INTERVAL_S
+              value: {{ .Values.dataSources.cptec.refreshIntervalS | quote }}
+            {{- end }}
+            {{- if .Values.dataSources.spacetrack.enabled }}
+            # NOTE: For higher-security deployments, consider mounting the
+            # 'spacetrack-credentials' secret as a volume instead of env vars,
+            # then reading credentials from the mounted file path.  Environment
+            # variables are visible in 'kubectl describe pod' output.
+            - name: SPACETRACK_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dataSources.spacetrack.credentialsSecret }}
+                  key: username
+            - name: SPACETRACK_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dataSources.spacetrack.credentialsSecret }}
+                  key: password
+            - name: SPACETRACK_REFRESH_INTERVAL_S
+              value: {{ .Values.dataSources.spacetrack.refreshIntervalS | quote }}
+            {{- end }}
+            {{- if .Values.dataSources.networkTraffic.enabled }}
+            - name: TRAFFIC_ENDPOINT_URL
+              value: {{ .Values.dataSources.networkTraffic.endpointUrl | quote }}
+            - name: TRAFFIC_REFRESH_INTERVAL_S
+              value: {{ .Values.dataSources.networkTraffic.refreshIntervalS | quote }}
+            {{- end }}
+            {{- if .Values.controller.explainability.enabled }}
+            - name: EXPLAINABILITY_ENABLED
+              value: "true"
+            - name: EXPLAINABILITY_METHOD
+              value: {{ .Values.controller.explainability.method | quote }}
+            {{- end }}
           ports:
             - name: metrics
               containerPort: 9090
