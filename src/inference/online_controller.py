@@ -273,6 +273,42 @@ class OnlineBeamController:
         """
         return self.consecutive_failures < self.max_failures
 
+    def apply_calibration(self, calibration: Dict[str, Any]) -> None:
+        """
+        Apply runtime calibration parameters without restarting the controller.
+
+        Reads a calibration dictionary (as produced by
+        ``scripts/analyze_field_test.py``) and updates the controller's
+        operational parameters in-place.  The following keys are recognised:
+
+        - ``snr_threshold_db``  – outage SNR threshold (dB).
+        - ``max_failures``      – consecutive watchdog failure limit.
+
+        Unknown keys are silently ignored, making the method forward-compatible.
+
+        Args:
+            calibration: Dictionary with calibration values.
+
+        Example::
+
+            import json
+            with open("/tmp/controller_calibration.json") as f:
+                cal = json.load(f)
+            controller.apply_calibration(cal)
+        """
+        if "snr_threshold_db" in calibration:
+            self.snr_threshold = float(calibration["snr_threshold_db"])
+            self._logger.info(
+                f"Calibration: snr_threshold_db set to {self.snr_threshold:.2f}",
+                event="calibration_applied",
+            )
+        if "max_failures" in calibration:
+            self.max_failures = int(calibration["max_failures"])
+            self._logger.info(
+                f"Calibration: max_failures set to {self.max_failures}",
+                event="calibration_applied",
+            )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

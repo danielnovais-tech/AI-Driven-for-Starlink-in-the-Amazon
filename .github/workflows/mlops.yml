@@ -1,0 +1,99 @@
+name: MLOps Pipeline
+
+# Run automatically every Sunday at 03:00 UTC (after the retraining CronJob)
+# or manually via workflow_dispatch.
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Pipeline mode: full | ci"
+        required: false
+        default: "ci"
+      model_name:
+        description: "Logical model name in the registry"
+        required: false
+        default: "ppo_amazon"
+      skip_field_test:
+        description: "Skip field-test stage (true/false)"
+        required: false
+        default: "false"
+      skip_pilot:
+        description: "Skip pilot-monitor stage (true/false)"
+        required: false
+        default: "false"
+
+# Minimal permissions: only need to read code and upload artifacts
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mlops:
+    name: MLOps pipeline (${{ github.event.inputs.mode || 'ci' }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-3.11-mlops-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-3.11-mlops-
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            torch>=2.0.0
+          pip install numpy pandas gymnasium h5py scipy pytest
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run MLOps pipeline
+        env:
+          MODEL_REGISTRY_PATH: /tmp/mlops-registry
+          MODEL_NAME: ${{ github.event.inputs.model_name || 'ppo_amazon' }}
+          MLOPS_SKIP_FIELD_TEST: ${{ github.event.inputs.skip_field_test == 'true' && '1' || '0' }}
+          MLOPS_SKIP_PILOT: ${{ github.event.inputs.skip_pilot == 'true' && '1' || '0' }}
+          MLOPS_AUDIT_LOG: /tmp/mlops_audit.json
+          PYTHONPATH: src
+        run: |
+          python scripts/mlops_pipeline.py \
+            --mode "${{ github.event.inputs.mode || 'ci' }}" \
+            --registry /tmp/mlops-registry \
+            --model-name "${{ github.event.inputs.model_name || 'ppo_amazon' }}" \
+            --tmp-dir /tmp/mlops_pipeline \
+            --output-audit /tmp/mlops_audit.json \
+            --verbose
+
+      - name: Upload audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlops-audit-${{ github.run_id }}
+          path: /tmp/mlops_audit.json
+          retention-days: 30
+
+      - name: Upload pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mlops-pipeline-${{ github.run_id }}
+          path: /tmp/mlops_pipeline/
+          retention-days: 7

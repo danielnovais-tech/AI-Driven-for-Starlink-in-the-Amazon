@@ -233,6 +233,7 @@ class NullPhasedArrayDriver(PhasedArrayDriver):
         self.command_log: List[BeamCommand] = []
         self._tx_power_dbm: float = 0.0
         self._phase_deg: float = 0.0
+        self.steering_gain: float = 1.0
 
     def apply_action(
         self,
@@ -241,16 +242,17 @@ class NullPhasedArrayDriver(PhasedArrayDriver):
         mcs_index: int,
         rb_alloc: int,
     ) -> None:
+        effective_phase = delta_phase * self.steering_gain
         cmd = BeamCommand(
             timestamp_s=time.time(),
-            delta_phase=delta_phase,
+            delta_phase=effective_phase,
             delta_power=delta_power,
             mcs_index=mcs_index,
             rb_alloc=rb_alloc,
         )
         self.command_log.append(cmd)
         self._tx_power_dbm = self._MAX_TX_POWER_DBM * delta_power
-        self._phase_deg = (self._phase_deg + np.degrees(delta_phase)) % 360.0
+        self._phase_deg = (self._phase_deg + np.degrees(effective_phase)) % 360.0
         logger.debug("NullPhasedArrayDriver: applied %s", cmd)
 
     def read_telemetry(self) -> DriverTelemetry:
@@ -371,6 +373,7 @@ class EthernetPhasedArrayDriver(PhasedArrayDriver):
         self._sock: Optional[socket.socket] = None
         self._current_phase_deg: float = 0.0
         self._current_power_dbm: float = 0.0
+        self.steering_gain: float = 1.0
 
     def connect(self) -> None:
         """
@@ -411,9 +414,11 @@ class EthernetPhasedArrayDriver(PhasedArrayDriver):
             mcs_index:    MCS index.
             rb_alloc:     Resource-block count.
         """
+        # Apply steering gain correction before state tracking and encoding
+        effective_phase = delta_phase * self.steering_gain
         # Update simulated state
         self._current_phase_deg = (
-            self._current_phase_deg + np.degrees(delta_phase)
+            self._current_phase_deg + np.degrees(effective_phase)
         ) % 360.0
         self._current_power_dbm = self.max_tx_power_dbm * delta_power
 
@@ -424,7 +429,7 @@ class EthernetPhasedArrayDriver(PhasedArrayDriver):
             return
 
         # Encode to wire format
-        phase_q = int(np.clip(round(delta_phase * (2 ** 13)), -(2 ** 15), 2 ** 15 - 1))
+        phase_q = int(np.clip(round(effective_phase * (2 ** 13)), -(2 ** 15), 2 ** 15 - 1))
         power_u8 = int(np.clip(round(delta_power * 255), 0, 255))
         frame = struct.pack(
             ">2sBBiBBB5s",
