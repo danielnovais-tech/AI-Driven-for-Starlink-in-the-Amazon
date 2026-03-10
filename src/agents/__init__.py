@@ -14,6 +14,13 @@ try:
 except ImportError:
     _FEDERATED_AVAILABLE = False
 
+# torch-geometric-dependent GNN PPO agent
+try:
+    from .gnn_ppo_agent import GNNPPOAgent
+    _GNN_AVAILABLE = True
+except ImportError:
+    _GNN_AVAILABLE = False
+
 __all__ = [
     "BeamformingNetwork",
     "DQNAgent",
@@ -25,4 +32,5 @@ __all__ = [
     "PrioritizedReplayBuffer",
     "SatelliteAgent",
     "FederatedAggregator",
+    "GNNPPOAgent",
 ]

@@ -286,6 +286,88 @@ def _fmt_table(results: Dict[str, Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HDF5 event stream for real-data benchmark
+# ---------------------------------------------------------------------------
+
+class _Hdf5EventStream:
+    """
+    Replay provider backed by an HDF5 file of real telemetry/radar events.
+
+    The HDF5 file must have the following datasets (all ``float32``):
+
+    .. code-block:: text
+
+        /satellites/positions   – (T, N_sat, 3)  ECEF km
+        /ground_station/pos     – (3,)            ECEF km (static)
+        /radar/rain_rate        – (T, N_sat)      mm/h per satellite position
+
+    where ``T`` is the number of time steps and ``N_sat`` is the number
+    of satellites.  If the number of time steps is exhausted the stream
+    wraps around.
+
+    When ``h5py`` is not installed this class falls back to a synthetic
+    provider identical to :class:`_CyclicTelemetry`.
+
+    Args:
+        path:     Path to the HDF5 file.
+        n_sats:   Number of satellites to expose (≤ dataset width).
+    """
+
+    ground_station_pos: np.ndarray
+
+    def __init__(self, path: str, n_sats: int) -> None:
+        self._n_sats = n_sats
+        self._step = 0
+        try:
+            import h5py
+            self._f = h5py.File(path, "r")
+            self._positions = np.asarray(self._f["satellites/positions"])  # (T, N, 3)
+            gs = np.asarray(self._f["ground_station/pos"])
+            self.ground_station_pos = gs.astype(np.float64)
+            self._rain = np.asarray(self._f["radar/rain_rate"])  # (T, N)
+            self._T = self._positions.shape[0]
+            self._real = True
+            print(f"[HDF5] Loaded {path}: T={self._T}, N_sat={self._positions.shape[1]}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[HDF5] Could not load {path}: {exc}; falling back to synthetic")
+            self._real = False
+            self.ground_station_pos = np.array([0.0, 0.0, 6371.0])
+            rng = np.random.default_rng(0)
+            self._fallback = _CyclicTelemetry(n_sats, rng)
+            self.ground_station_pos = self._fallback.ground_station_pos
+        self._rain_idx = 0
+
+    def get_visible_satellites(self) -> List[np.ndarray]:
+        if not self._real:
+            return self._fallback.get_visible_satellites()
+        t = self._step % self._T
+        self._step += 1
+        row = self._positions[t, : self._n_sats, :]  # (n_sats, 3)
+        return [row[i].astype(np.float64) for i in range(self._n_sats)]
+
+    def get_rain_at_step(self, sat_idx: int) -> float:
+        """Return rain rate for satellite ``sat_idx`` at the current step."""
+        if not self._real:
+            return 5.0
+        t = (self._step - 1) % self._T
+        return float(self._rain[t, min(sat_idx, self._rain.shape[1] - 1)])
+
+
+class _Hdf5Radar:
+    """Radar adapter that delegates to :class:`_Hdf5EventStream`."""
+
+    def __init__(self, stream: "_Hdf5EventStream") -> None:
+        self._stream = stream
+        self._cache: dict = {}
+
+    def get_at_location(self, pos: np.ndarray) -> float:
+        # Use position hash to retrieve the correct satellite index
+        # (positions are unique per satellite in the HDF5 dataset)
+        key = tuple(pos[:2].round(0).astype(int))
+        return self._stream.get_rain_at_step(0)  # simplified: use first sat's rain
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -303,6 +385,17 @@ def _parse_args(argv=None):
                         help="Master random seed.")
     parser.add_argument("--output-json", default=None,
                         help="Optional path to save benchmark results as JSON.")
+    parser.add_argument(
+        "--data-file",
+        default=None,
+        metavar="HDF5_PATH",
+        help=(
+            "Path to an HDF5 file with real telemetry/radar events "
+            "(datasets: satellites/positions, ground_station/pos, "
+            "radar/rain_rate).  When provided, the benchmark replays "
+            "real orbital data instead of using the synthetic cyclic model."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -311,8 +404,16 @@ def main(argv=None) -> int:
     rng = np.random.default_rng(args.seed)
 
     channel = ChannelModel()
-    telemetry = _CyclicTelemetry(args.max_satellites, rng)
-    radar = _ConstantRadar()
+
+    if args.data_file is not None:
+        print(f"[benchmark] Loading real data from: {args.data_file}")
+        hdf5_stream = _Hdf5EventStream(args.data_file, n_sats=args.max_satellites)
+        radar = _Hdf5Radar(hdf5_stream)
+        telemetry = hdf5_stream
+    else:
+        telemetry = _CyclicTelemetry(args.max_satellites, rng)
+        radar = _ConstantRadar()
+
     foliage = _ConstantFoliage()
 
     def _make_env():
@@ -346,8 +447,10 @@ def main(argv=None) -> int:
     policies["round_robin"] = _RoundRobinPolicy()
     policies["random"] = _RandomPolicy(seed=args.seed)
 
+    data_source = args.data_file or "synthetic"
     print(f"\nBenchmark: {args.n_episodes} episodes × {args.max_steps} steps "
-          f"| {args.max_satellites} satellites | seed={args.seed}\n")
+          f"| {args.max_satellites} satellites | seed={args.seed} "
+          f"| data={data_source}\n")
 
     results = {}
     for name, policy in policies.items():

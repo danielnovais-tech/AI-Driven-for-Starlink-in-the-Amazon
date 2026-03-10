@@ -127,3 +127,49 @@ persistence:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# ---------------------------------------------------------------------------
+# Periodic retraining CronJob
+# ---------------------------------------------------------------------------
+retraining:
+  enabled: true
+  # Weekly on Sunday at 02:00 UTC
+  schedule: "0 2 * * 0"
+  modelName: ppo_amazon
+  # Number of validation episodes per retrain cycle
+  nEpisodes: 50
+  # Federated learning rounds per cycle
+  federatedRounds: 5
+  # Maximum outage probability required for promotion (1.0 = always promote)
+  outageThreshold: 1.0
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2000m"
+      memory: "4Gi"
+
+# ---------------------------------------------------------------------------
+# Prometheus alerting rules (requires prometheus-operator CRD)
+# ---------------------------------------------------------------------------
+prometheusRule:
+  enabled: false   # set to true when prometheus-operator is installed
+  # Additional labels to select which Prometheus instance picks up the rule
+  additionalLabels:
+    prometheus: kube-prometheus
+  # Outage rate > this fraction for outageRateDuration → critical alert
+  outageRateThreshold: 0.15
+  outageRateDuration: "5m"
+  # 95th-percentile latency above this (ms) → warning alert
+  latencyP95ThresholdMs: 400
+  # Fallback activations/s above this → warning alert
+  fallbackRateThreshold: 0.1
+  # SNR below this (dB) → warning alert
+  snrWarningThresholdDb: 5.0
+
+# ---------------------------------------------------------------------------
+# Grafana dashboard (injected as ConfigMap with grafana_dashboard=1 label)
+# ---------------------------------------------------------------------------
+grafana:
+  enabled: false   # set to true when Grafana sidecar is configured

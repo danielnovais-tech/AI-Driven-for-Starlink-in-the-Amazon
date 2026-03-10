@@ -346,3 +346,72 @@ class FederatedAggregator:
         weights = self.aggregate(participants)
         self.broadcast(participants)
         return weights
+
+    # ------------------------------------------------------------------
+    # Model registry integration
+    # ------------------------------------------------------------------
+
+    def export_to_registry(
+        self,
+        registry,
+        model_name: str = "federated_global",
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Save the current global model to a :class:`~utils.model_registry.ModelRegistry`.
+
+        The exported model is a thin wrapper that re-uses the first
+        participant agent's ``net`` architecture, populated with the
+        averaged global weights produced by the last :meth:`aggregate`
+        call.
+
+        This is the bridge between federated training and the production
+        deployment pipeline: after every ``n`` rounds, call
+        ``export_to_registry`` and the CronJob retrain pipeline will
+        automatically detect and validate the new checkpoint.
+
+        Args:
+            registry:       A :class:`~utils.model_registry.ModelRegistry`
+                            instance.
+            model_name:     Logical name under which to register the
+                            model (default ``"federated_global"``).
+            extra_metadata: Additional JSON-serialisable metadata to
+                            attach to the checkpoint (e.g. validation
+                            metrics, round number).
+
+        Returns:
+            Path string of the saved version directory.
+
+        Raises:
+            RuntimeError: If :meth:`aggregate` has not been called yet
+                          (no global weights available).
+        """
+        if self._global_weights is None:
+            raise RuntimeError(
+                "No global weights available.  Call aggregate() before "
+                "export_to_registry()."
+            )
+
+        # Build a representative nn.Module from the first participant's network
+        ref_agent = self.agents[0]
+        import copy as _copy
+        import torch as _torch
+
+        net = _copy.deepcopy(ref_agent.net)
+        net.load_state_dict(self._global_weights)
+
+        metadata = {
+            "federated_round": self._round,
+            "n_participants": len(self.agents),
+            "satellite_ids": [
+                str(a.satellite_id) for a in self.agents
+            ],
+            **(extra_metadata or {}),
+        }
+
+        version_path = registry.save(
+            model_name=model_name,
+            model=net,
+            metadata=metadata,
+        )
+        return version_path
