@@ -269,7 +269,8 @@ def gnn_node_importance(
 
     # Enable gradient tracking for node features
     x = data[node_type].x.to(device).detach().clone().requires_grad_(True)
-    # The differentiable node features are already set in data above
+    # Attach the differentiable features back onto the graph so gradients flow.
+    data[node_type].x = x
 
     # Forward pass
     try:

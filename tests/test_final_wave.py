@@ -422,7 +422,7 @@ class TestAcceptanceTest:
             path = f.name
         try:
             run_acceptance_test(steps=5, output_md=path)
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 content = f.read()
             assert "Acceptance Test" in content
         finally:

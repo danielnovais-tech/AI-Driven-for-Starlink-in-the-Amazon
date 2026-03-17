@@ -93,6 +93,11 @@ pip install torch-geometric
 pytest tests/ -v
 ```
 
+### Windows note (Model Registry)
+
+`ModelRegistry` stores each model as versioned directories (`v1/`, `v2/`, …) and maintains a `latest` alias.
+On Windows, creating symlinks may require Administrator privileges or Developer Mode; when symlinks aren’t available the registry falls back to writing a small text file named `latest` containing the current version (e.g. `v3`).
+
 ---
 
 ## References

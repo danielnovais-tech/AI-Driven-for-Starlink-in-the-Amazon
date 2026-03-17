@@ -15,7 +15,7 @@ Stored artefacts (one directory per version)::
         │   └── metadata.json     – hyperparameters, metrics, timestamp
         ├── v2/
         │   └── ...
-        └── latest -> v2          – symlink to the most recent version
+        └── latest -> v2          – symlink (or text pointer on Windows) to the most recent version
 
 Usage::
 
@@ -70,6 +70,7 @@ class ModelRegistry:
 
     _METADATA_FILE = "metadata.json"
     _MODEL_FILE = "model.pt"
+    _LATEST_ALIAS = "latest"
 
     def __init__(self, root_dir: str = "model_registry") -> None:
         self.root = Path(root_dir)
@@ -121,11 +122,8 @@ class ModelRegistry:
         with open(version_dir / self._METADATA_FILE, "w", encoding="utf-8") as f:
             json.dump(full_meta, f, indent=2, default=str)
 
-        # Update 'latest' symlink
-        latest_link = model_dir / "latest"
-        if latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(version)
+        # Update 'latest' alias (symlink when possible; pointer file otherwise)
+        self._set_latest_alias(model_dir, version)
 
         return str(version_dir)
 
@@ -249,12 +247,11 @@ class ModelRegistry:
 
         # Re-point latest
         model_dir = self.root / model_name
-        latest_link = model_dir / "latest"
-        if latest_link.is_symlink():
-            latest_link.unlink()
         remaining = self.list_versions(model_name)
         if remaining:
-            latest_link.symlink_to(remaining[-1])
+            self._set_latest_alias(model_dir, remaining[-1])
+        else:
+            self._remove_latest_alias(model_dir)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -272,14 +269,61 @@ class ModelRegistry:
         if not model_dir.is_dir():
             raise FileNotFoundError(f"No model named '{model_name}' in registry")
         if version == "latest":
-            latest_link = model_dir / "latest"
-            if not latest_link.exists():
+            latest_alias = model_dir / self._LATEST_ALIAS
+            if not latest_alias.exists():
                 raise FileNotFoundError(f"No 'latest' version for '{model_name}'")
-            # Resolve symlink
-            return (model_dir / os.readlink(latest_link)).resolve()
+
+            # Preferred: symlink/junction
+            if latest_alias.is_symlink():
+                return latest_alias.resolve()
+
+            # Windows-friendly fallback: plain text file containing the version string (e.g. "v3")
+            if latest_alias.is_file():
+                target = latest_alias.read_text(encoding="utf-8").strip()
+                if not target:
+                    raise FileNotFoundError(
+                        f"Invalid 'latest' pointer for '{model_name}': empty file"
+                    )
+                version_dir = model_dir / target
+                if not version_dir.is_dir():
+                    raise FileNotFoundError(
+                        f"Invalid 'latest' pointer for '{model_name}': {target} does not exist"
+                    )
+                return version_dir
+
+            raise FileNotFoundError(
+                f"Invalid 'latest' alias for '{model_name}': not a symlink or file"
+            )
         version_dir = model_dir / version
         if not version_dir.is_dir():
             raise FileNotFoundError(
                 f"Version '{version}' not found for model '{model_name}'"
             )
         return version_dir
+
+    def _remove_latest_alias(self, model_dir: Path) -> None:
+        latest_alias = model_dir / self._LATEST_ALIAS
+        if not latest_alias.exists() and not latest_alias.is_symlink():
+            return
+        try:
+            if latest_alias.is_symlink() or latest_alias.is_file():
+                latest_alias.unlink()
+            elif latest_alias.is_dir():
+                shutil.rmtree(latest_alias)
+        except OSError:
+            # Best-effort cleanup; callers treat missing alias as "no latest".
+            return
+
+    def _set_latest_alias(self, model_dir: Path, version: str) -> None:
+        self._remove_latest_alias(model_dir)
+        latest_alias = model_dir / self._LATEST_ALIAS
+
+        # Try to create a symlink/junction first.
+        try:
+            latest_alias.symlink_to(version, target_is_directory=True)
+            return
+        except (OSError, NotImplementedError):
+            pass
+
+        # Fallback: write a pointer file.
+        latest_alias.write_text(f"{version}\n", encoding="utf-8")
